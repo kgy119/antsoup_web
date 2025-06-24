@@ -1,21 +1,25 @@
 <?php
-// 데이터베이스 연결 설정
-define('DB_HOST', 'localhost');        
-define('DB_USER', 'antsoup');    
-define('DB_PASS', 'roalxkd1712');
-define('DB_NAME', 'antsoup');   
-define('DB_CHARSET', 'utf8mb4');
+// database.php
 
-// PDO를 이용한 데이터베이스 연결 클래스
+require_once __DIR__ . '/env.php';
+
+Env::load(); // .env 파일 로드
+
 class Database {
-    private $host = DB_HOST;
-    private $user = DB_USER;
-    private $pass = DB_PASS;
-    private $dbname = DB_NAME;
-    private $charset = DB_CHARSET;
+    private $host;
+    private $user;
+    private $pass;
+    private $dbname;
+    private $charset;
     private $pdo;
     
     public function __construct() {
+        $this->host = Env::get('DB_HOST', 'localhost');
+        $this->user = Env::get('DB_USERNAME', 'root');
+        $this->pass = Env::get('DB_PASSWORD', '');
+        $this->dbname = Env::get('DB_DATABASE', '');
+        $this->charset = Env::get('DB_CHARSET', 'utf8mb4');
+
         $this->connect();
     }
     
@@ -29,7 +33,6 @@ class Database {
             ];
             
             $this->pdo = new PDO($dsn, $this->user, $this->pass, $options);
-            
         } catch (PDOException $e) {
             die("데이터베이스 연결 실패: " . $e->getMessage());
         }
@@ -38,11 +41,10 @@ class Database {
     public function getConnection() {
         return $this->pdo;
     }
-    
-    // 연결 테스트 메서드
+
     public function testConnection() {
         try {
-            $stmt = $this->pdo->query("SELECT 1");
+            $this->pdo->query("SELECT 1");
             return "데이터베이스 연결 성공!";
         } catch (PDOException $e) {
             return "연결 실패: " . $e->getMessage();
@@ -50,7 +52,7 @@ class Database {
     }
 }
 
-// 전역 데이터베이스 연결 인스턴스
+// 전역 DB 인스턴스 생성
 $database = new Database();
 $pdo = $database->getConnection();
 ?>

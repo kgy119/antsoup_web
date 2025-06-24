@@ -21,9 +21,9 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit();
 }
 
-// 필요한 파일들 include
-require_once '../../config/database.php';
-require_once '../../models/User.php';
+// 필요한 파일들 include (__DIR__ 사용으로 수정)
+require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../models/User.php';
 
 try {
     // JSON 입력 데이터 받기

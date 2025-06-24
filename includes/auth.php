@@ -1,8 +1,62 @@
 <?php
-// 기존 데이터베이스 구조에 맞춘 API 수정 사항들
+// includes/auth.php
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/jwt.php';
 
-// 1. AuthUtils::getCurrentUser() 수정 - 기존 컬럼명에 맞춤
 class AuthUtils {
+    
+    /**
+     * 요청에서 토큰 추출
+     */
+    public static function getTokenFromRequest() {
+        $headers = getallheaders();
+        
+        // Authorization 헤더에서 토큰 추출
+        if (isset($headers['Authorization'])) {
+            $authHeader = $headers['Authorization'];
+            if (preg_match('/Bearer\s+(.*)$/i', $authHeader, $matches)) {
+                return $matches[1];
+            }
+        }
+        
+        // authorization 헤더 (소문자)
+        if (isset($headers['authorization'])) {
+            $authHeader = $headers['authorization'];
+            if (preg_match('/Bearer\s+(.*)$/i', $authHeader, $matches)) {
+                return $matches[1];
+            }
+        }
+        
+        return null;
+    }
+    
+    /**
+     * 토큰 검증
+     */
+    public static function verifyToken($token) {
+        try {
+            // 간단한 Base64 토큰 디코딩 (실제로는 JWT 라이브러리 사용 권장)
+            $payload = json_decode(base64_decode($token), true);
+            
+            if (!$payload || !isset($payload['user_id']) || !isset($payload['exp'])) {
+                return false;
+            }
+            
+            // 토큰 만료 확인
+            if ($payload['exp'] < time()) {
+                return false;
+            }
+            
+            return $payload;
+            
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+    
+    /**
+     * 현재 사용자 정보 가져오기
+     */
     public static function getCurrentUser() {
         $token = self::getTokenFromRequest();
         if (!$token) {
@@ -15,9 +69,11 @@ class AuthUtils {
         }
         
         try {
-            $db = Database::getInstance()->getConnection();
-            $stmt = $db->prepare("
-                SELECT id, username, email, phone_number, profile_picture as profile_image,
+            $database = new Database();
+            $pdo = $database->getConnection();
+            
+            $stmt = $pdo->prepare("
+                SELECT id, username, email, phone_number, profile_picture,
                        provider, provider_id, email_verified, phone_verified, status,
                        last_login, created_at, updated_at
                 FROM users 
@@ -30,191 +86,149 @@ class AuthUtils {
                 return null;
             }
             
+            // 불린 값 변환
+            $user['email_verified'] = (bool)$user['email_verified'];
+            $user['phone_verified'] = (bool)$user['phone_verified'];
+            
             return $user;
         } catch (Exception $e) {
+            error_log('Get current user error: ' . $e->getMessage());
             return null;
+        }
+    }
+    
+    /**
+     * 인증 필요 (로그인 체크)
+     */
+    public static function requireAuth() {
+        $user = self::getCurrentUser();
+        
+        if (!$user) {
+            http_response_code(401);
+            echo json_encode([
+                'success' => false,
+                'message' => '인증이 필요합니다.'
+            ], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+        
+        return $user;
+    }
+    
+    /**
+     * 토큰 생성
+     */
+    public static function generateToken($userId, $email) {
+        $payload = [
+            'user_id' => $userId,
+            'email' => $email,
+            'exp' => time() + (24 * 60 * 60), // 24시간
+            'iat' => time(),
+            'iss' => 'antsoup.co.kr'
+        ];
+        
+        return base64_encode(json_encode($payload));
+    }
+    
+    /**
+     * 인증 코드 생성 (6자리 숫자)
+     */
+    public static function generateVerificationCode() {
+        return str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+    }
+    
+    /**
+     * 랜덤 토큰 생성 (비밀번호 재설정 등)
+     */
+    public static function generateRandomToken($length = 32) {
+        return bin2hex(random_bytes($length));
+    }
+    
+    /**
+     * 토큰 블랙리스트 확인
+     */
+    public static function isTokenBlacklisted($token) {
+        try {
+            $database = new Database();
+            $pdo = $database->getConnection();
+            
+            $tokenHash = hash('sha256', $token);
+            
+            $stmt = $pdo->prepare("
+                SELECT id FROM blacklisted_tokens 
+                WHERE token_hash = ? AND expires_at > NOW()
+            ");
+            $stmt->execute([$tokenHash]);
+            
+            return $stmt->rowCount() > 0;
+            
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+    
+    /**
+     * 사용자 로그인 시도 기록
+     */
+    public static function logLoginAttempt($email, $success, $failureReason = null) {
+        try {
+            $database = new Database();
+            $pdo = $database->getConnection();
+            
+            $stmt = $pdo->prepare("
+                INSERT INTO login_attempts (
+                    email, ip_address, user_agent, success, failure_reason, attempted_at
+                ) VALUES (?, ?, ?, ?, ?, NOW())
+            ");
+            
+            $stmt->execute([
+                $email,
+                $_SERVER['REMOTE_ADDR'] ?? null,
+                $_SERVER['HTTP_USER_AGENT'] ?? null,
+                $success ? 1 : 0,
+                $failureReason
+            ]);
+        } catch (Exception $e) {
+            error_log('Login attempt logging error: ' . $e->getMessage());
+        }
+    }
+    
+    /**
+     * 사용자 활동 로그
+     */
+    public static function logUserActivity($userId, $action, $resourceType = null, $resourceId = null, $metadata = null) {
+        try {
+            $database = new Database();
+            $pdo = $database->getConnection();
+            
+            $stmt = $pdo->prepare("
+                INSERT INTO user_activity_logs (
+                    user_id, action, resource_type, resource_id, 
+                    ip_address, user_agent, metadata, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+            ");
+            
+            $stmt->execute([
+                $userId,
+                $action,
+                $resourceType,
+                $resourceId,
+                $_SERVER['REMOTE_ADDR'] ?? null,
+                $_SERVER['HTTP_USER_AGENT'] ?? null,
+                $metadata ? json_encode($metadata) : null
+            ]);
+        } catch (Exception $e) {
+            error_log('User activity logging error: ' . $e->getMessage());
         }
     }
 }
 
-// 2. 토큰 블랙리스트 함수 수정 - 기존 blacklisted_tokens 테이블 사용
-function addTokenToBlacklist($db, $token, $userId) {
-    try {
-        $stmt = $db->prepare("
-            INSERT INTO blacklisted_tokens (token_hash, user_id, expires_at) 
-            VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 24 HOUR))
-            ON DUPLICATE KEY UPDATE blacklisted_at = NOW()
-        ");
-        
-        $tokenHash = hash('sha256', $token);
-        $stmt->execute([$tokenHash, $userId]);
-        
-    } catch (Exception $e) {
-        error_log('Token blacklist error: ' . $e->getMessage());
-    }
+// 전역 상수 정의
+if (!defined('EMAIL_VERIFICATION_EXPIRY')) {
+    define('EMAIL_VERIFICATION_EXPIRY', 600); // 10분
 }
 
-// 3. 소셜 로그인 시 social_accounts 테이블도 업데이트
-function createGoogleUser($db, $googleUser, $username) {
-    try {
-        $db->beginTransaction();
-        
-        // users 테이블에 사용자 생성
-        $stmt = $db->prepare("
-            INSERT INTO users (
-                username, email, provider, provider_id, 
-                email_verified, email_verified_at, profile_picture,
-                created_at, updated_at
-            ) VALUES (?, ?, 'google', ?, 1, NOW(), ?, NOW(), NOW())
-        ");
-        
-        $stmt->execute([
-            $username,
-            $googleUser['email'],
-            $googleUser['id'],
-            $googleUser['picture']
-        ]);
-        
-        $userId = $db->lastInsertId();
-        
-        // social_accounts 테이블에도 정보 저장
-        $stmt = $db->prepare("
-            INSERT INTO social_accounts (
-                user_id, provider, provider_id, provider_email, 
-                provider_name, provider_avatar, created_at, updated_at
-            ) VALUES (?, 'google', ?, ?, ?, ?, NOW(), NOW())
-        ");
-        
-        $stmt->execute([
-            $userId,
-            $googleUser['id'],
-            $googleUser['email'],
-            $googleUser['name'],
-            $googleUser['picture']
-        ]);
-        
-        // user_settings 기본값 생성
-        $stmt = $db->prepare("
-            INSERT INTO user_settings (user_id, created_at, updated_at) 
-            VALUES (?, NOW(), NOW())
-        ");
-        $stmt->execute([$userId]);
-        
-        // user_profiles 기본값 생성
-        $stmt = $db->prepare("
-            INSERT INTO user_profiles (user_id, created_at, updated_at) 
-            VALUES (?, NOW(), NOW())
-        ");
-        $stmt->execute([$userId]);
-        
-        // 기본 'user' 역할 할당
-        $stmt = $db->prepare("
-            INSERT INTO user_role_assignments (user_id, role_id, assigned_at) 
-            VALUES (?, 1, NOW())
-        ");
-        $stmt->execute([$userId]);
-        
-        $db->commit();
-        
-        // 생성된 사용자 정보 반환
-        $stmt = $db->prepare("
-            SELECT id, username, email, provider, email_verified, phone_verified,
-                   profile_picture as profile_image, created_at, updated_at
-            FROM users 
-            WHERE id = ?
-        ");
-        $stmt->execute([$userId]);
-        
-        return $stmt->fetch(PDO::FETCH_ASSOC);
-        
-    } catch (Exception $e) {
-        $db->rollBack();
-        throw new Exception('구글 사용자 생성 실패: ' . $e->getMessage());
-    }
-}
-
-// 4. 이메일 인증 상태 업데이트 시 users 테이블도 함께 업데이트
-function verifyEmailWithUserTable($db, $currentUser, $verificationCode) {
-    $db->beginTransaction();
-    
-    try {
-        // 사용자 이메일 인증 상태 업데이트
-        $stmt = $db->prepare("
-            UPDATE users 
-            SET email_verified = 1, email_verified_at = NOW(), updated_at = NOW() 
-            WHERE id = ?
-        ");
-        $stmt->execute([$currentUser['id']]);
-        
-        // 인증 코드 사용 처리
-        $stmt = $db->prepare("
-            UPDATE email_verifications 
-            SET is_used = 1, used_at = NOW() 
-            WHERE user_id = ? AND verification_code = ? AND is_used = 0
-        ");
-        $stmt->execute([$currentUser['id'], $verificationCode]);
-        
-        // 활동 로그 기록
-        $stmt = $db->prepare("
-            INSERT INTO user_activity_logs (user_id, action, ip_address, user_agent, created_at) 
-            VALUES (?, 'email_verified', ?, ?, NOW())
-        ");
-        $stmt->execute([
-            $currentUser['id'],
-            $_SERVER['REMOTE_ADDR'] ?? null,
-            $_SERVER['HTTP_USER_AGENT'] ?? null
-        ]);
-        
-        $db->commit();
-        
-    } catch (Exception $e) {
-        $db->rollBack();
-        throw $e;
-    }
-}
-
-// 5. 로그인 시도 기록 함수
-function logLoginAttempt($db, $email, $success, $failureReason = null) {
-    try {
-        $stmt = $db->prepare("
-            INSERT INTO login_attempts (
-                email, ip_address, user_agent, success, failure_reason, attempted_at
-            ) VALUES (?, ?, ?, ?, ?, NOW())
-        ");
-        
-        $stmt->execute([
-            $email,
-            $_SERVER['REMOTE_ADDR'] ?? null,
-            $_SERVER['HTTP_USER_AGENT'] ?? null,
-            $success ? 1 : 0,
-            $failureReason
-        ]);
-    } catch (Exception $e) {
-        error_log('Login attempt logging error: ' . $e->getMessage());
-    }
-}
-
-// 6. 사용자 활동 로그 함수
-function logUserActivity($db, $userId, $action, $resourceType = null, $resourceId = null, $metadata = null) {
-    try {
-        $stmt = $db->prepare("
-            INSERT INTO user_activity_logs (
-                user_id, action, resource_type, resource_id, 
-                ip_address, user_agent, metadata, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
-        ");
-        
-        $stmt->execute([
-            $userId,
-            $action,
-            $resourceType,
-            $resourceId,
-            $_SERVER['REMOTE_ADDR'] ?? null,
-            $_SERVER['HTTP_USER_AGENT'] ?? null,
-            $metadata ? json_encode($metadata) : null
-        ]);
-    } catch (Exception $e) {
-        error_log('User activity logging error: ' . $e->getMessage());
-    }
+if (!defined('PASSWORD_RESET_EXPIRY')) {
+    define('PASSWORD_RESET_EXPIRY', 3600); // 1시간
 }
 ?>
